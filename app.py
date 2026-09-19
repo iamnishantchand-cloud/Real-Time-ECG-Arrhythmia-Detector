@@ -118,18 +118,20 @@ def load_demo_recording(record_id):
         "peaks": data["peaks"],
         "labels": data["labels"],
         "beat_segments": data["beat_segments"],
+        "rr_features": data["rr_features"] if "rr_features" in data else np.zeros((len(data["peaks"]), 4), dtype=np.float32),
     }
 
 
 @st.cache_data
-def predict_all_beats(_model, beat_segments, record_id):
+def predict_all_beats(_model, beat_segments, rr_features, record_id):
     # Run model inference on ALL beats in a recording at once.
     # We pre-compute predictions for the entire recording up front so the
     # playback animation is silky smooth - no inference delay per frame.
     # The _model parameter has an underscore prefix to tell Streamlit
     # not to try hashing it (models are not hashable).
     X = beat_segments[..., np.newaxis]
-    probs = _model.predict(X, verbose=0)
+    RR = rr_features.astype(np.float32)
+    probs = _model.predict([X, RR], verbose=0)
     preds = np.argmax(probs, axis=1)
     confidences = np.max(probs, axis=1)
     return preds, confidences
@@ -395,10 +397,11 @@ def main():
         peaks = recording["peaks"]
         true_labels = recording["labels"]
         beat_segments = recording["beat_segments"]
+        rr_features = recording["rr_features"]
 
         # Pre-compute all predictions for smooth playback
         # (this runs ONCE per recording selection, then is cached)
-        preds, confs = predict_all_beats(model, beat_segments, selected_id)
+        preds, confs = predict_all_beats(model, beat_segments, rr_features, selected_id)
 
         # ── Initialize session state for animation ──
         if "position" not in st.session_state:

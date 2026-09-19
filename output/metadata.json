@@ -74,14 +74,21 @@
   "pre_peak": 90,
   "post_peak": 160,
   "sampling_freq": 360,
-  "train_size": 86739,
+  "train_size": 97714,
   "test_size": 11738,
+  "rr_features_dim": 4,
+  "rr_feature_names": [
+    "pre_RR",
+    "post_RR",
+    "local_avg_RR",
+    "pre_RR/avg_ratio"
+  ],
   "train_class_distribution": {
-    "N": 71184,
-    "S": 2583,
-    "V": 4526,
-    "F": 417,
-    "Q": 8029
+    "N": 80623,
+    "S": 2637,
+    "V": 5991,
+    "F": 430,
+    "Q": 8033
   },
   "test_class_distribution": {
     "N": 9971,

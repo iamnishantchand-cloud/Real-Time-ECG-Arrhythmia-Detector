@@ -121,53 +121,62 @@ def residual_block(x, filters, kernel_size=5):
     return out
 
 
-def build_model(input_length, num_classes):
+def build_model(input_length, num_classes, rr_dim=4):
     """
-    Build a Residual 1D-CNN for ECG beat classification.
+    Build a Dual-Input Residual 1D-CNN for ECG beat classification.
 
     Architecture:
-      - Initial Conv1D(64, 7) for broad feature extraction
-      - 3 Residual Blocks with increasing filters (64 -> 128 -> 256)
-        with skip connections for gradient flow
-      - GlobalAveragePooling for translation invariance
-      - Dense classification head with dropout regularization
+      Branch 1 (Waveform):
+        - Initial Conv1D(64, 7) for broad feature extraction
+        - 3 Residual Blocks with increasing filters (64 -> 128 -> 256)
+          with skip connections for gradient flow
+        - GlobalAveragePooling for translation invariance
+
+      Branch 2 (RR-Interval Features):
+        - Dense(16) -> Dense(8) for rhythm dynamics
+        - Captures patient-independent timing patterns (Zhou 2024)
+
+      Merged:
+        - Concatenate both branches
+        - Dense classification head with dropout regularization
 
     Uses Focal Loss instead of cross-entropy for better handling
     of class imbalance.
     """
-    inputs = layers.Input(shape=(input_length, 1))
+    # ── Branch 1: ECG Waveform (Residual CNN) ──
+    waveform_input = layers.Input(shape=(input_length, 1), name="waveform_input")
 
-    # Initial broad feature extraction
-    x = layers.Conv1D(64, kernel_size=7, padding="same")(inputs)
+    x = layers.Conv1D(64, kernel_size=7, padding="same")(waveform_input)
     x = layers.BatchNormalization()(x)
     x = layers.Activation("relu")(x)
     x = layers.MaxPooling1D(pool_size=2)(x)
-    # Output: (125, 64)
 
-    # Residual Block 1: local pattern detection
     x = residual_block(x, 64, kernel_size=5)
     x = layers.MaxPooling1D(pool_size=2)(x)
-    # Output: (62, 64)
 
-    # Residual Block 2: morphological pattern detection
     x = residual_block(x, 128, kernel_size=5)
     x = layers.MaxPooling1D(pool_size=2)(x)
-    # Output: (31, 128)
 
-    # Residual Block 3: high-level shape detection
     x = residual_block(x, 256, kernel_size=3)
     x = layers.MaxPooling1D(pool_size=2)(x)
-    # Output: (15, 256)
 
-    # Classification head
     x = layers.GlobalAveragePooling1D()(x)
-    x = layers.Dense(256, activation="relu")(x)
-    x = layers.Dropout(0.5)(x)
-    x = layers.Dense(128, activation="relu")(x)
-    x = layers.Dropout(0.3)(x)
-    outputs = layers.Dense(num_classes, activation="softmax")(x)
 
-    model = keras.Model(inputs=inputs, outputs=outputs)
+    # ── Branch 2: RR-Interval Features (Dense) ──
+    rr_input = layers.Input(shape=(rr_dim,), name="rr_input")
+    rr = layers.Dense(16, activation="relu")(rr_input)
+    rr = layers.BatchNormalization()(rr)
+    rr = layers.Dense(8, activation="relu")(rr)
+
+    # ── Merge both branches ──
+    merged = layers.Concatenate()([x, rr])
+    merged = layers.Dense(256, activation="relu")(merged)
+    merged = layers.Dropout(0.5)(merged)
+    merged = layers.Dense(128, activation="relu")(merged)
+    merged = layers.Dropout(0.3)(merged)
+    outputs = layers.Dense(num_classes, activation="softmax")(merged)
+
+    model = keras.Model(inputs=[waveform_input, rr_input], outputs=outputs)
 
     model.compile(
         optimizer=keras.optimizers.Adam(learning_rate=LEARNING_RATE),
@@ -263,10 +272,13 @@ def main():
     print("\n[1/5] Loading prepared data...")
     X_train = np.load(os.path.join(OUTPUT_DIR, "X_train.npy"))
     y_train = np.load(os.path.join(OUTPUT_DIR, "y_train.npy"))
+    RR_train = np.load(os.path.join(OUTPUT_DIR, "RR_train.npy"))
     X_test = np.load(os.path.join(OUTPUT_DIR, "X_test.npy"))
     y_test = np.load(os.path.join(OUTPUT_DIR, "y_test.npy"))
+    RR_test = np.load(os.path.join(OUTPUT_DIR, "RR_test.npy"))
 
     print(f"  Training set : {X_train.shape[0]:>6,} beats | shape: {X_train.shape}")
+    print(f"  RR features  : {RR_train.shape}")
     print(f"  Test set     : {X_test.shape[0]:>6,} beats | shape: {X_test.shape}")
 
     # Class distribution summary
@@ -288,6 +300,7 @@ def main():
 
     X_aug_list = [X_train]
     y_aug_list = [y_train]
+    RR_aug_list = [RR_train]
 
     for cls, count in zip(unique_classes, class_counts):
         if count < target_min:
@@ -299,8 +312,9 @@ def main():
                 # Pick a random sample from this class
                 idx = np.random.choice(cls_indices)
                 beat = X_train[idx].copy()
+                rr = RR_train[idx].copy()
 
-                # Apply random augmentations:
+                # Apply random augmentations to waveform:
                 # 1. Gaussian noise (simulates electrode noise)
                 noise = np.random.normal(0, 0.02, beat.shape)
                 beat = beat + noise
@@ -317,16 +331,22 @@ def main():
                 # Clip to [0, 1] range
                 beat = np.clip(beat, 0, 1)
 
+                # Slight jitter on RR features (5% noise to prevent overfitting)
+                rr = rr + np.random.normal(0, 0.05, rr.shape).astype(np.float32)
+
                 X_aug_list.append(beat.reshape(1, -1))
                 y_aug_list.append(np.array([cls]))
+                RR_aug_list.append(rr.reshape(1, -1))
 
     X_train = np.concatenate(X_aug_list, axis=0)
     y_train = np.concatenate(y_aug_list, axis=0)
+    RR_train = np.concatenate(RR_aug_list, axis=0)
 
     # Shuffle augmented data
     shuffle_idx = np.random.permutation(len(X_train))
     X_train = X_train[shuffle_idx]
     y_train = y_train[shuffle_idx]
+    RR_train = RR_train[shuffle_idx]
 
     print(f"  After augmentation: {X_train.shape[0]:,} training beats")
     unique_aug, counts_aug = np.unique(y_train, return_counts=True)
@@ -337,11 +357,13 @@ def main():
     X_train = X_train[..., np.newaxis]
     X_test = X_test[..., np.newaxis]
 
-    # ── Step 3: Build and train Residual CNN ────────────────────────────
-    # Focal loss replaces class weights — it automatically focuses on
+    # ── Step 3: Build and train Dual-Input Residual CNN ──────────────
+    # Focal loss replaces class weights -- it automatically focuses on
     # hard-to-classify samples without destabilizing training.
-    print("\n[3/5] Building and training Residual 1D-CNN with Focal Loss...")
-    model = build_model(X_train.shape[1], len(CLASS_NAMES))
+    print("\n[3/5] Building and training Dual-Input Residual 1D-CNN...")
+    print("       Branch 1: ECG Waveform (Residual CNN)")
+    print("       Branch 2: RR-Interval Features (Dense)")
+    model = build_model(X_train.shape[1], len(CLASS_NAMES), rr_dim=RR_train.shape[1])
     model.summary()
 
     # Callbacks for optimal training:
@@ -359,7 +381,7 @@ def main():
     ]
 
     history = model.fit(
-        X_train, y_train,
+        [X_train, RR_train], y_train,
         validation_split=0.1,
         epochs=EPOCHS,
         batch_size=BATCH_SIZE,
@@ -384,7 +406,7 @@ def main():
 
     # ── Step 4: Evaluate on held-out test set ─────────────────────────
     print("\n[4/5] Evaluating on held-out test set...")
-    y_pred_probs = model.predict(X_test, verbose=0)
+    y_pred_probs = model.predict([X_test, RR_test], verbose=0)
     y_pred = np.argmax(y_pred_probs, axis=1)
 
     # Overall accuracy

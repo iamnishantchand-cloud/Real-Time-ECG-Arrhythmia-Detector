@@ -219,10 +219,13 @@ def segment_beats(signal, peak_positions, symbols):
     rhythm-change markers like '+' or '~') are skipped, as are beats
     too close to the recording boundaries.
 
+    Also computes RR-interval features for each beat (see compute_rr_features).
+
     Returns:
         beats: (N, 250) array of beat waveforms
         labels: (N,) array of integer class labels (0-4)
         valid_positions: (N,) array of R-peak positions for kept beats
+        rr_features: (N, 4) array of RR-interval features per beat
     """
     beats = []
     labels = []
@@ -247,7 +250,86 @@ def segment_beats(signal, peak_positions, symbols):
         labels.append(CLASS_TO_IDX[label])
         positions.append(pos)
 
-    return np.array(beats), np.array(labels), np.array(positions)
+    positions_arr = np.array(positions)
+
+    # Compute RR-interval features for rhythm dynamics
+    rr_features = compute_rr_features(positions_arr)
+
+    return np.array(beats), np.array(labels), positions_arr, rr_features
+
+
+def compute_rr_features(peak_positions):
+    """
+    Compute RR-interval features for each beat.
+
+    RR-intervals capture patient-independent rhythm dynamics that improve
+    inter-patient generalization (Zhou 2024). For each beat we compute:
+
+      1. pre_RR:   RR interval before this beat (samples to previous R-peak)
+      2. post_RR:  RR interval after this beat (samples to next R-peak)
+      3. local_avg_RR: average RR interval over a 10-beat local window
+      4. ratio:    pre_RR / local_avg_RR (>1 = longer pause before beat,
+                   <1 = premature beat — key indicator of ectopic beats)
+
+    All values are normalized to seconds (divided by sampling frequency)
+    and then z-score normalized across the recording.
+
+    Returns:
+        rr_features: (N, 4) array of normalized RR-interval features
+    """
+    n = len(peak_positions)
+    if n < 3:
+        return np.zeros((n, 4), dtype=np.float32)
+
+    pre_rr = np.zeros(n, dtype=np.float32)
+    post_rr = np.zeros(n, dtype=np.float32)
+    local_avg_rr = np.zeros(n, dtype=np.float32)
+    ratio = np.zeros(n, dtype=np.float32)
+
+    # Compute RR intervals in seconds
+    rr_intervals = np.diff(peak_positions).astype(np.float32) / FS
+
+    for i in range(n):
+        # Pre-RR: interval before this beat
+        if i > 0:
+            pre_rr[i] = rr_intervals[i - 1]
+        else:
+            pre_rr[i] = rr_intervals[0] if len(rr_intervals) > 0 else 1.0
+
+        # Post-RR: interval after this beat
+        if i < n - 1:
+            post_rr[i] = rr_intervals[i]
+        else:
+            post_rr[i] = rr_intervals[-1] if len(rr_intervals) > 0 else 1.0
+
+        # Local average RR: mean of surrounding 10-beat window
+        window_start = max(0, i - 5)
+        window_end = min(len(rr_intervals), i + 5)
+        if window_start < window_end:
+            local_avg_rr[i] = np.mean(rr_intervals[window_start:window_end])
+        else:
+            local_avg_rr[i] = 1.0
+
+        # Ratio: pre_RR / local_avg_RR (premature beats have ratio < 1)
+        if local_avg_rr[i] > 0.01:
+            ratio[i] = pre_rr[i] / local_avg_rr[i]
+        else:
+            ratio[i] = 1.0
+
+    # Stack into (N, 4) array
+    features = np.stack([pre_rr, post_rr, local_avg_rr, ratio], axis=1)
+
+    # Z-score normalize each feature across the recording
+    for j in range(4):
+        col = features[:, j]
+        mean = np.mean(col)
+        std = np.std(col)
+        if std > 1e-6:
+            features[:, j] = (col - mean) / std
+        else:
+            features[:, j] = 0.0
+
+    return features
 
 
 def normalize_beats(beats):
@@ -285,17 +367,20 @@ def process_records(record_ids, label=""):
     Returns:
         all_beats: (total_N, 250) array of normalized beat waveforms
         all_labels: (total_N,) array of integer class labels
+        all_rr_features: (total_N, 4) array of RR-interval features
     """
     all_beats = []
     all_labels = []
+    all_rr = []
 
     for rec_id in record_ids:
         try:
             signal, peaks, symbols = load_record(rec_id)
-            beats, labels, _ = segment_beats(signal, peaks, symbols)
+            beats, labels, _, rr_feats = segment_beats(signal, peaks, symbols)
             beats = normalize_beats(beats)
             all_beats.append(beats)
             all_labels.append(labels)
+            all_rr.append(rr_feats)
 
             # Show class distribution for this record
             unique, counts = np.unique(labels, return_counts=True)
@@ -308,7 +393,7 @@ def process_records(record_ids, label=""):
     if not all_beats:
         raise RuntimeError(f"No {label} records could be loaded!")
 
-    return np.concatenate(all_beats), np.concatenate(all_labels)
+    return np.concatenate(all_beats), np.concatenate(all_labels), np.concatenate(all_rr)
 
 
 def save_demo_recordings(record_ids):
@@ -333,7 +418,7 @@ def save_demo_recordings(record_ids):
     for rec_id in record_ids:
         try:
             signal, peaks, symbols = load_record(rec_id)
-            beats, labels, valid_peaks = segment_beats(signal, peaks, symbols)
+            beats, labels, valid_peaks, rr_feats = segment_beats(signal, peaks, symbols)
             beats_norm = normalize_beats(beats)
 
             out_path = os.path.join(DEMO_DIR, f"record_{rec_id}.npz")
@@ -343,6 +428,7 @@ def save_demo_recordings(record_ids):
                 peaks=valid_peaks,
                 labels=labels,
                 beat_segments=beats_norm,
+                rr_features=rr_feats,
                 fs=FS,
             )
 
@@ -383,22 +469,24 @@ def main():
 
     # ── Step 2: Process training records ──────────────────────────────
     print(f"\n[2/4] Segmenting TRAINING beats ({len(TRAIN_RECORDS)} patients):")
-    train_beats_list, train_labels_list = [], []
+    train_beats_list, train_labels_list, train_rr_list = [], [], []
     for rec_id in TRAIN_RECORDS:
         if rec_id not in record_cache:
             print(f"    [!] Skipping {rec_id} (not loaded)")
             continue
         signal, peaks, symbols = record_cache[rec_id]
-        beats, labels, _ = segment_beats(signal, peaks, symbols)
+        beats, labels, _, rr_feats = segment_beats(signal, peaks, symbols)
         beats = normalize_beats(beats)
         train_beats_list.append(beats)
         train_labels_list.append(labels)
+        train_rr_list.append(rr_feats)
         unique, counts = np.unique(labels, return_counts=True)
         dist = {CLASS_NAMES[u]: int(c) for u, c in zip(unique, counts)}
         print(f"    > {rec_id}: {len(beats)} beats | Classes: {dist}")
 
     X_train = np.concatenate(train_beats_list)
     y_train = np.concatenate(train_labels_list)
+    RR_train = np.concatenate(train_rr_list)
 
     train_unique, train_counts = np.unique(y_train, return_counts=True)
     train_dist = {CLASS_NAMES[u]: int(c) for u, c in zip(train_unique, train_counts)}
@@ -407,22 +495,24 @@ def main():
 
     # ── Step 3: Process test records ─────────────────────────────────
     print(f"\n[3/4] Segmenting TEST beats ({len(TEST_RECORDS)} patients):")
-    test_beats_list, test_labels_list = [], []
+    test_beats_list, test_labels_list, test_rr_list = [], [], []
     for rec_id in TEST_RECORDS:
         if rec_id not in record_cache:
             print(f"    [!] Skipping {rec_id} (not loaded)")
             continue
         signal, peaks, symbols = record_cache[rec_id]
-        beats, labels, _ = segment_beats(signal, peaks, symbols)
+        beats, labels, _, rr_feats = segment_beats(signal, peaks, symbols)
         beats = normalize_beats(beats)
         test_beats_list.append(beats)
         test_labels_list.append(labels)
+        test_rr_list.append(rr_feats)
         unique, counts = np.unique(labels, return_counts=True)
         dist = {CLASS_NAMES[u]: int(c) for u, c in zip(unique, counts)}
         print(f"    > {rec_id}: {len(beats)} beats | Classes: {dist}")
 
     X_test = np.concatenate(test_beats_list)
     y_test = np.concatenate(test_labels_list)
+    RR_test = np.concatenate(test_rr_list)
 
     test_unique, test_counts = np.unique(y_test, return_counts=True)
     test_dist = {CLASS_NAMES[u]: int(c) for u, c in zip(test_unique, test_counts)}
@@ -438,12 +528,13 @@ def main():
             print(f"    [!] Skipping demo {rec_id} (not loaded)")
             continue
         signal, peaks, symbols = record_cache[rec_id]
-        beats, labels, valid_peaks = segment_beats(signal, peaks, symbols)
+        beats, labels, valid_peaks, rr_feats = segment_beats(signal, peaks, symbols)
         beats_norm = normalize_beats(beats)
 
         out_path = os.path.join(DEMO_DIR, f"record_{rec_id}.npz")
         np.savez(out_path, signal=signal, peaks=valid_peaks,
-                 labels=labels, beat_segments=beats_norm, fs=FS)
+                 labels=labels, beat_segments=beats_norm,
+                 rr_features=rr_feats, fs=FS)
 
         unique, counts = np.unique(labels, return_counts=True)
         dist = {CLASS_NAMES[u]: int(c) for u, c in zip(unique, counts)}
@@ -453,8 +544,10 @@ def main():
     # ── Save processed data to disk ──────────────────────────────────
     np.save(os.path.join(OUTPUT_DIR, "X_train.npy"), X_train)
     np.save(os.path.join(OUTPUT_DIR, "y_train.npy"), y_train)
+    np.save(os.path.join(OUTPUT_DIR, "RR_train.npy"), RR_train)
     np.save(os.path.join(OUTPUT_DIR, "X_test.npy"), X_test)
     np.save(os.path.join(OUTPUT_DIR, "y_test.npy"), y_test)
+    np.save(os.path.join(OUTPUT_DIR, "RR_test.npy"), RR_test)
 
     # Save metadata for reproducibility and dashboard consumption
     metadata = {
@@ -475,6 +568,8 @@ def main():
         "sampling_freq": FS,
         "train_size": int(X_train.shape[0]),
         "test_size": int(X_test.shape[0]),
+        "rr_features_dim": 4,
+        "rr_feature_names": ["pre_RR", "post_RR", "local_avg_RR", "pre_RR/avg_ratio"],
         "train_class_distribution": train_dist,
         "test_class_distribution": test_dist,
     }
@@ -484,6 +579,7 @@ def main():
     print(f"\n{'=' * 65}")
     print(f"  Data preparation complete!")
     print(f"  Training beats : {X_train.shape[0]:>6,}  shape: {X_train.shape}")
+    print(f"  RR features    : {RR_train.shape}")
     print(f"  Test beats     : {X_test.shape[0]:>6,}  shape: {X_test.shape}")
     print(f"  Demo recordings: {len(saved_demos)} ({saved_demos})")
     print(f"  Output dir     : {os.path.abspath(OUTPUT_DIR)}")

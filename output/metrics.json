@@ -1,72 +1,72 @@
 {
-  "accuracy": 0.8106150962685296,
+  "accuracy": 0.8204123360027262,
   "per_class": {
     "N": {
-      "precision": 0.9692,
-      "recall": 0.8321,
-      "f1_score": 0.8954,
+      "precision": 0.9685,
+      "recall": 0.8406,
+      "f1_score": 0.9,
       "support": 9971
     },
     "S": {
-      "precision": 0.0519,
-      "recall": 0.0278,
-      "f1_score": 0.0362,
+      "precision": 0.2308,
+      "recall": 0.0417,
+      "f1_score": 0.0706,
       "support": 144
     },
     "V": {
-      "precision": 0.4013,
-      "recall": 0.9719,
-      "f1_score": 0.568,
+      "precision": 0.4148,
+      "recall": 0.9879,
+      "f1_score": 0.5843,
       "support": 1244
     },
     "F": {
-      "precision": 0.0541,
-      "recall": 0.0108,
-      "f1_score": 0.0179,
+      "precision": 0.1529,
+      "recall": 0.0349,
+      "f1_score": 0.0569,
       "support": 372
     },
     "Q": {
-      "precision": 0.0769,
-      "recall": 0.1429,
-      "f1_score": 0.1,
+      "precision": 0.0,
+      "recall": 0.0,
+      "f1_score": 0.0,
       "support": 7
     }
   },
   "confusion_matrix": [
     [
-      8297,
-      73,
-      1527,
-      70,
-      4
+      8382,
+      20,
+      1492,
+      72,
+      5
     ],
     [
-      33,
-      4,
+      31,
+      6,
       107,
       0,
       0
     ],
     [
-      27,
+      11,
       0,
-      1209,
+      1229,
       0,
-      8
+      4
     ],
     [
-      201,
+      225,
       0,
-      167,
-      4,
+      134,
+      13,
       0
     ],
     [
-      3,
+      6,
       0,
-      3,
+      1,
       0,
-      1
+      0
     ]
   ],
   "class_names": [
@@ -76,7 +76,7 @@
     "F",
     "Q"
   ],
-  "train_size": 213552,
+  "train_size": 241867,
   "test_size": 11738,
   "epochs_trained": 50,
   "epochs_max": 50,
