@@ -421,15 +421,16 @@ def main():
         with col_controls:
             c1, c2, c3, c4 = st.columns(4)
             with c1:
-                if st.button("▶️ Play", use_container_width=True, type="primary"):
-                    st.session_state.playing = True
+                st.button("Play", use_container_width=True, type="primary",
+                          on_click=lambda: st.session_state.update(playing=True))
             with c2:
-                if st.button("⏸ Pause", use_container_width=True):
-                    st.session_state.playing = False
+                st.button("Pause", use_container_width=True,
+                          on_click=lambda: st.session_state.update(playing=False))
             with c3:
-                if st.button("🔄 Reset", use_container_width=True):
+                def reset_playback():
                     st.session_state.position = VISIBLE_WINDOW
                     st.session_state.playing = False
+                st.button("Reset", use_container_width=True, on_click=reset_playback)
             with c4:
                 speed = st.select_slider(
                     "Speed",
@@ -585,10 +586,10 @@ def main():
             advance = int(CHUNK_SIZE * speed_mult)
             st.session_state.position = min(pos + advance, len(signal))
             time.sleep(ANIMATION_DELAY)
-            st.rerun()
+            st.rerun(scope="app")
         elif pos >= len(signal):
             st.session_state.playing = False
-            st.success("✅ Playback complete! All beats in this recording have been analyzed.")
+            st.success("Playback complete! All beats in this recording have been analyzed.")
 
     # ══════════════════════════════════════════════════════════════════
     #  TAB 2: MODEL PERFORMANCE
